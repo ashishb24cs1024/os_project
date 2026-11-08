@@ -1,85 +1,38 @@
+"""Deterministic, fail-closed agent for the current xv6 milestone.
+Mutating tools remain disabled until kernel speculation and a guest harness exist.
 """
-Deterministic AI Agent & Tool Dispatcher.
-Executes structured actions validated against TOOLS_SCHEMA,
-and communicates observations back from the xv6 QEMU bridge.
-"""
-
-from typing import Dict, Any
-from tools import validate_action, TOOLS_SCHEMA
+from typing import Any, Dict
 from bridge import QEMUBridge
+from tools import validate_action
 
 class ToolExecutor:
-    def __init__(self, bridge: QEMUBridge):
-        self.bridge = bridge
-
-    def execute(self, action: Dict[str, Any]) -> str:
-        validate_action(action)
-        tool = action["tool"]
-        args = action.get("args", {})
-
-        if tool == "list_files":
-            return self.bridge.send_command("ls")
-        elif tool == "read_file":
-            path = args["path"]
-            return self.bridge.send_command(f"cat {path}")
-        elif tool == "write_file":
-            path = args["path"]
-            content = args["content"]
-            return self.bridge.send_command(f"echo \"{content}\" > {path}")
-        elif tool == "summarize":
-            text = args["text"]
-            lines = text.strip().splitlines()
-            return f"Summary: Contains {len(lines)} lines. Snippet: '{lines[0] if lines else ''}'"
-        elif tool == "speculative_run":
-            cmd = args["command"]
-            commit = args["commit"]
-            # In xv6 with Problem 5 support:
-            # We wrap the command in a speculative harness runner
-            action_type = "commit" if commit else "abort"
-            return self.bridge.send_command(f"spectest {action_type} \"{cmd}\"")
-        else:
-            raise ValueError(f"Unhandled tool: {tool}")
+ def __init__(self,bridge:QEMUBridge): self.bridge=bridge
+ def execute(self,action:Dict[str,Any])->str:
+  validate_action(action); tool=action["tool"]; args=action.get("args",{})
+  if tool=="list_files": return self.bridge.send_command("ls")
+  if tool=="read_file": return self.bridge.send_command("cat "+args["path"].lstrip("/"))
+  if tool=="summarize":
+   lines=[line.strip() for line in args["text"].splitlines() if line.strip()]
+   return f"Summary: {len(lines)} non-empty lines. "+(lines[0] if lines else "No content.")
+  if tool in {"write_file","speculative_run"}:
+   raise NotImplementedError(f"{tool} disabled: implement and verify kernel speculation and a safe guest harness first")
+  raise ValueError(f"Unhandled tool: {tool}")
 
 class Agent:
-    def __init__(self, executor: ToolExecutor):
-        self.executor = executor
+ def __init__(self,executor:ToolExecutor): self.executor=executor
+ def plan_deterministic(self,request:str)->Dict[str,Any]:
+  req=request.strip(); low=req.lower()
+  if low in {"list","list files","show files"}: return {"tool":"list_files","args":{}}
+  if low.startswith("read "): return {"tool":"read_file","args":{"path":req[5:].strip()}}
+  if low.startswith("summarize "): return {"tool":"summarize","args":{"text":req[10:].strip()}}
+  raise ValueError("Use list files, read filename, or summarize text")
+ def run(self,request:str)->str:
+  action=self.plan_deterministic(request); print("[Agent] Proposed action:",action)
+  result=self.executor.execute(action); print("[Agent] Observation:",result); return result
 
-    def plan_deterministic(self, request: str) -> Dict[str, Any]:
-        """
-        Milestone C: Deterministic rule-based planner.
-        Translates human user intent into structured JSON tool calls.
-        """
-        req = request.lower().strip()
-        if req.startswith("list") or "files" in req:
-            return {"tool": "list_files", "args": {}}
-        elif req.startswith("read ") or "cat " in req:
-            path = request.split()[-1]
-            return {"tool": "read_file", "args": {"path": path}}
-        elif req.startswith("summarize"):
-            text = request[len("summarize"):].strip()
-            return {"tool": "summarize", "args": {"text": text}}
-        else:
-            # Default fallthrough
-            return {"tool": "list_files", "args": {}}
-
-    def run(self, request: str) -> str:
-        """Runs the planner, validates the action, and executes via bridge."""
-        action = self.plan_deterministic(request)
-        print(f"[Agent] Proposed Action: {action}")
-        observation = self.executor.execute(action)
-        print(f"[Agent] Observation: {observation}")
-        return observation
-
-if __name__ == "__main__":
-    bridge = QEMUBridge(mock=True)
-    bridge.start()
-    executor = ToolExecutor(bridge)
-    agent = Agent(executor)
-
-    print("\n--- Testing list_files ---")
-    agent.run("list files")
-
-    print("\n--- Testing read report.txt ---")
-    agent.run("read report.txt")
-
-    bridge.close()
+if __name__=="__main__":
+ bridge=QEMUBridge()
+ try:
+  bridge.start(); agent=Agent(ToolExecutor(bridge))
+  agent.run("list files"); agent.run("read README")
+ finally: bridge.close()
